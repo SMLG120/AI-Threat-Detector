@@ -1,0 +1,91 @@
+
+
+services:
+  backend:
+    build: ./backend
+    container_name: aiwaf_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aiwaf:aiwaf_secret@postgres:5432/aiwaf
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_DIR=/app/models
+    volumes:
+      - ./logs:/app/logs
+      - model_data:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import asyncio; from core.database import engine; asyncio.run(engine.connect())"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    container_name: aiwaf_worker
+    command: python -m celery -A core.celery_app worker --loglevel=info -Q detection
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aiwaf:aiwaf_secret@postgres:5432/aiwaf
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_DIR=/app/models
+    volumes:
+      - ./logs:/app/logs
+      - model_data:/app/models
+    depends_on:
+      - backend
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: aiwaf_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aiwaf_postgres
+    environment:
+      POSTGRES_DB: aiwaf
+      POSTGRES_USER: aiwaf
+      POSTGRES_PASSWORD: aiwaf_secret
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiwaf"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: aiwaf_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: aiwaf_nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./logs:/var/log/nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  model_data:
