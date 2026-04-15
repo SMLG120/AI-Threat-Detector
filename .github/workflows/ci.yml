@@ -47,6 +47,7 @@ jobs:
       - name: Lint
         run: |
           cd backend
+          ruff check . --select E,F,W --ignore E501 --fix
           ruff check . --select E,F,W --ignore E501
 
       - name: Run tests
@@ -70,7 +71,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: frontend/package.json
 
       - name: Install & Build
         run: |
