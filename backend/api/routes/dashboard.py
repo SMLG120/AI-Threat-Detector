@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from db.models import RequestLog, Alert
+from db.models import RequestLog
 from core.database import get_db
 from datetime import datetime, timedelta
 
@@ -15,7 +15,7 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
     total = await db.scalar(select(func.count()).select_from(RequestLog))
     malicious = await db.scalar(
-        select(func.count()).select_from(RequestLog).where(RequestLog.is_malicious == True)
+        select(func.count()).select_from(RequestLog).where(RequestLog.is_malicious)
     )
     recent = await db.scalar(
         select(func.count()).select_from(RequestLog).where(RequestLog.timestamp >= last_24h)
@@ -27,7 +27,7 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
     # Attack type distribution
     result = await db.execute(
-        select(RequestLog.attack_types).where(RequestLog.is_malicious == True).limit(500)
+        select(RequestLog.attack_types).where(RequestLog.is_malicious).limit(500)
     )
     attack_counts: dict = {}
     for row in result.scalars():

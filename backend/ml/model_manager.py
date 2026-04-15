@@ -3,7 +3,6 @@ ML Model Manager
 Loads trained models (ONNX / sklearn) and runs ensemble inference.
 Falls back to synthetic bootstrapping if models don't exist yet.
 """
-import os
 import pickle
 import numpy as np
 from pathlib import Path

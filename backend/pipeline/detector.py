@@ -3,7 +3,7 @@ Detection Pipeline
 Orchestrates: Feature Extraction → Rule Engine → ML Ensemble → Score Aggregation
 """
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 from urllib.parse import urlparse
 
 from core.config import settings
@@ -41,7 +41,6 @@ async def analyze_request(req: RawRequest) -> DetectionResult:
 
     parsed = urlparse(req.url)
     query = parsed.query or ""
-    path = parsed.path or ""
 
     # ── 1. Feature Extraction ─────────────────────────────────────────────
     feature_vector = extract_features(req)

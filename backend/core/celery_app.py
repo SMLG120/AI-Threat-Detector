@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from core.config import settings
 
 celery_app = Celery(
@@ -21,7 +22,6 @@ celery_app.conf.update(
     task_acks_late=True,
 )
 
-from celery.schedules import crontab
 celery_app.conf.beat_schedule = {
     'retrain-models': {
         'task': 'tasks.retrain.retrain_models',

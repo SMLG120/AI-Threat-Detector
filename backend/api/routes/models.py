@@ -4,7 +4,6 @@ from sqlalchemy import select
 from db.models import RequestLog
 from ml.model_manager import model_manager
 from core.database import get_db
-import numpy as np
 
 router = APIRouter()
 

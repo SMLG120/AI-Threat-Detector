@@ -165,7 +165,7 @@ async def list_logs(
     query = query.offset((page - 1) * limit).limit(limit)
     result = await db.execute(query)
     logs = result.scalars().all()
-    return {"logs": [_serialize_log(l) for l in logs]}
+    return {"logs": [_serialize_log(log_item) for log_item in logs]}
 
 
 def _serialize_log(log: RequestLog) -> dict:

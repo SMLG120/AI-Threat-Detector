@@ -7,7 +7,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from core.config import settings
 from core.database import init_db
 from core.redis_client import redis_client
 from api.routes import logs, threats, models, websocket, dashboard
