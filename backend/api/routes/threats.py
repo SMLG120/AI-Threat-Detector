@@ -1,14 +1,20 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
-from db.models import Alert
-from core.database import get_db
 
-router = APIRouter()
+from core.config import settings
+from core.database import get_db
+from core.security import rate_limit, require_dashboard_key
+from db.models import Alert
+
+router = APIRouter(dependencies=[Depends(require_dashboard_key), Depends(rate_limit)])
 
 
 @router.get("/alerts")
-async def get_alerts(limit: int = 20, db: AsyncSession = Depends(get_db)):
+async def get_alerts(
+    limit: int = Query(20, ge=1, le=settings.MAX_PAGE_SIZE),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(Alert).order_by(desc(Alert.timestamp)).limit(limit)
     )

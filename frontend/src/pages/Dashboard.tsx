@@ -190,6 +190,17 @@ export default function Dashboard() {
     }
   };
 
+  const handleLabel = async (id: string, isMalicious: boolean) => {
+    try {
+      await api.labelLog(id, isMalicious);
+      const update = (l: RequestLog) => (l.id === id ? { ...l, verified_label: isMalicious } : l);
+      setLogs((prev) => prev.map(update));
+      logsRef.current = logsRef.current.map(update);
+    } catch (err) {
+      console.error("Labeling failed:", err);
+    }
+  };
+
   const filteredLogs = filter === "ALL" ? logs : logs.filter((l) => l.threat_level === filter);
 
   const attackDist = stats?.attack_distribution
@@ -424,6 +435,7 @@ export default function Dashboard() {
                   <th>Threat Score</th>
                   <th>Level</th>
                   <th>Attack Types</th>
+                  <th>Verify</th>
                 </tr>
               </thead>
               <tbody>
@@ -470,11 +482,29 @@ export default function Dashboard() {
                         </span>
                       ))}
                     </td>
+                    <td>
+                      <div className="label-actions">
+                        <button
+                          className={`btn-label ${log.verified_label === true ? "active-attack" : ""}`}
+                          title="Confirm this request is an attack"
+                          onClick={() => handleLabel(log.id, true)}
+                        >
+                          Attack
+                        </button>
+                        <button
+                          className={`btn-label ${log.verified_label === false ? "active-benign" : ""}`}
+                          title="Mark as benign (false positive)"
+                          onClick={() => handleLabel(log.id, false)}
+                        >
+                          Benign
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
                 {filteredLogs.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="empty-row">
+                    <td colSpan={8} className="empty-row">
                       No logs found. Run the attack simulator to generate traffic.
                     </td>
                   </tr>

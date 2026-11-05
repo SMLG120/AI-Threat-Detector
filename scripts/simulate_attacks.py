@@ -5,14 +5,17 @@ Generates realistic HTTP traffic — a mix of benign requests and
 simulated attacks — to populate the dashboard and test detection.
 
 Usage:
-    python simulate_attacks.py [--url http://localhost:8000] [--count 200] [--delay 0.1]
+    export AIWAF_INGEST_KEY=<INGEST_API_KEY from .env>
+    python simulate_attacks.py [--url https://waf.example.com] [--count 200] [--delay 0.1]
 """
 import asyncio
+import os
 import random
 import argparse
 import httpx
 
-API_URL = "http://localhost:8000"
+API_URL = os.getenv("AIWAF_URL", "http://localhost:8000")
+API_KEY = os.getenv("AIWAF_INGEST_KEY", "")
 ENDPOINT = "/api/logs/ingest"
 
 BENIGN_PATHS = [
@@ -53,7 +56,9 @@ def make_attack():
 async def simulate(api_url, count, delay, ratio):
     print(f"\n🚨 AI-WAF Attack Simulator — Continuous mode @ {api_url}\n")
     ok = err = 0
-    async with httpx.AsyncClient(timeout=10) as client:
+    if not API_KEY:
+        raise SystemExit("Set AIWAF_INGEST_KEY to the INGEST_API_KEY value from .env")
+    async with httpx.AsyncClient(timeout=10, headers={"X-API-Key": API_KEY}) as client:
         while True:  # Continuous loop
             for i in range(1, count+1):
                 is_attack = random.random() < ratio
@@ -61,6 +66,7 @@ async def simulate(api_url, count, delay, ratio):
                 label = "🔴 ATTACK" if is_attack else "🟢 BENIGN"
                 try:
                     resp = await client.post(f"{api_url}{ENDPOINT}", json=payload)
+                    resp.raise_for_status()
                     d = resp.json()
                     print(f"[{i:04d}] {label} | score={d.get('threat_score',0):.3f} | level={d.get('threat_level','?'):6} | ip={payload['ip_address']}")
                     ok += 1

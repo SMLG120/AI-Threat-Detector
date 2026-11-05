@@ -13,6 +13,7 @@ export interface RequestLog {
   rule_score?: number;
   random_forest_score?: number;
   isolation_forest_score?: number;
+  verified_label?: boolean | null;
 }
 
 export interface Alert {

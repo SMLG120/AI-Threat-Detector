@@ -6,9 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  backend-lint:
-    name: Backend — Lint & Test
+  backend:
+    name: Backend — Lint, Test, Migrate, Audit
     runs-on: ubuntu-latest
 
     services:
@@ -17,7 +20,7 @@ jobs:
         env:
           POSTGRES_DB: aiwaf_test
           POSTGRES_USER: aiwaf
-          POSTGRES_PASSWORD: aiwaf_secret
+          POSTGRES_PASSWORD: ci_only_password
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
@@ -25,43 +28,53 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgresql+asyncpg://aiwaf:ci_only_password@localhost:5432/aiwaf_test
+      REDIS_URL: redis://localhost:6379/0
+      INGEST_API_KEY: ci-ingest-key-0000000000000000000000000000
+      DASHBOARD_API_KEY: ci-dashboard-key-000000000000000000000000000
+      MODEL_DIR: /tmp/models
+
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: Install dependencies
-        run: |
-          cd backend
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio ruff
+        run: pip install -r requirements-dev.txt
 
       - name: Lint
-        run: |
-          cd backend
-          ruff check . --select E,F,W --ignore E501 --fix
-          ruff check . --select E,F,W --ignore E501
+        run: ruff check . --select E,F,W --ignore E501
 
-      - name: Run tests
-        env:
-          DATABASE_URL: postgresql+asyncpg://aiwaf:aiwaf_secret@localhost:5432/aiwaf_test
-          REDIS_URL: redis://localhost:6379/0
-          MODEL_DIR: /tmp/models
-        run: |
-          cd backend
-          pytest tests/ -v --tb=short || echo "No tests found yet"
+      - name: Unit tests
+        run: pytest -v --tb=short
 
-  frontend-build:
-    name: Frontend — Build
+      - name: Migrations apply cleanly (up, down, up)
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Dependency vulnerability audit
+        run: pip-audit -r requirements.txt
+
+  frontend:
+    name: Frontend — Build & Audit
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
@@ -71,28 +84,82 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install & Build
         run: |
-          cd frontend
           npm ci
           npm run build
 
-  docker-build:
-    name: Docker — Compose Build
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    name: Docker — Build, Smoke Test, Scan
     runs-on: ubuntu-latest
-    needs: [backend-lint, frontend-build]
+    needs: [backend, frontend]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build all containers
-        run: docker compose build --no-cache
+      - name: Create CI environment file
+        run: |
+          cat > .env <<EOF
+          DOMAIN=localhost
+          POSTGRES_PASSWORD=$(openssl rand -hex 16)
+          REDIS_PASSWORD=$(openssl rand -hex 16)
+          INGEST_API_KEY=$(openssl rand -hex 32)
+          DASHBOARD_API_KEY=$(openssl rand -hex 32)
+          EOF
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Start stack
+        run: docker compose up -d
 
       - name: Smoke test
         run: |
-          docker compose up -d
-          sleep 15
-          curl --fail http://localhost:8000/health
-          docker compose down
+          set -a; . ./.env; set +a
+          for i in $(seq 1 60); do
+            curl -ksf https://localhost/health && break
+            sleep 2
+          done
+          curl -ksf https://localhost/health
+
+          # Unauthenticated access is rejected
+          test "$(curl -ks -o /dev/null -w '%{http_code}' https://localhost/api/dashboard/stats)" = "401"
+          # Internal endpoints are not exposed
+          test "$(curl -ks -o /dev/null -w '%{http_code}' https://localhost/metrics)" = "404"
+
+          # Ingest with the key detects an attack
+          curl -ksf https://localhost/api/logs/ingest \
+            -H "X-API-Key: $INGEST_API_KEY" -H "Content-Type: application/json" \
+            -d '{"ip_address":"1.2.3.4","method":"GET","url":"https://x.com/?id=1 UNION SELECT password FROM users"}' \
+            | tee /dev/stderr | grep -q SQL_INJECTION
+
+          # Dashboard key can read it back
+          curl -ksf https://localhost/api/dashboard/stats -H "X-API-Key: $DASHBOARD_API_KEY"
+
+          # Celery worker is up and responding (catches import/dependency errors)
+          for i in $(seq 1 30); do
+            docker compose exec -T worker sh -c 'celery -A core.celery_app inspect ping -d celery@$HOSTNAME --timeout 10' && break
+            sleep 5
+          done
+          docker compose exec -T worker sh -c 'celery -A core.celery_app inspect ping -d celery@$HOSTNAME --timeout 10'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: aiwaf-backend
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

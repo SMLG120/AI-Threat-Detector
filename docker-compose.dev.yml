@@ -1,0 +1,19 @@
+# Local development overrides:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Publishes the API on :8000 (for scripts / `npm run dev`) and enables /docs.
+services:
+  caddy:
+    environment:
+      DOMAIN: localhost
+  backend:
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      ENVIRONMENT: development
+      ENABLE_DOCS: "true"
+      LOG_JSON: "false"
+      WEB_CONCURRENCY: "1"
+  postgres:
+    ports:
+      # 5433 on the host so it doesn't clash with a locally installed Postgres
+      - "127.0.0.1:${DEV_POSTGRES_PORT:-5433}:5432"
