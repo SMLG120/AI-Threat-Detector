@@ -16,7 +16,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     MODEL_DIR=/app/models
 
+# Apply Debian security updates on top of the base image (e.g. zlib fixes that
+# land before the python:3.12-slim tag is rebuilt), then add runtime libs.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends libpq5 curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 app
