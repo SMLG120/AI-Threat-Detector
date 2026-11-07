@@ -68,51 +68,93 @@ HTTP Logs / nginx
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (local)
 
 ### Prerequisites
 
 - Docker & Docker Compose v2+
 - (Optional) Python 3.11+ for the attack simulator
 
-### 1. Clone & Launch
+### 1. Configure
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai-waf.git
-cd ai-waf
-
-# Start all services
-docker compose up --build -d
+cp .env.example .env
+# Fill in secrets — generate each with: openssl rand -hex 32
+# For local use set DOMAIN=localhost
 ```
 
-Services will be available at:
+### 2. Launch
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+```
 
 | Service | URL |
 |---------|-----|
-| **Dashboard** | http://localhost:3000 |
-| **API docs** | http://localhost:8000/docs |
-| **API (direct)** | http://localhost:8000 |
+| **Dashboard** | https://localhost (self-signed cert locally) — sign in with `DASHBOARD_API_KEY` |
+| **API docs** (dev only) | http://localhost:8000/docs |
 
-> **Note:** On first boot, the backend will auto-train ML models using synthetic data. This takes ~30–60 seconds.
+On first boot the `init` job runs database migrations and trains the bootstrap models.
 
-### 2. Simulate Traffic
+### 3. Simulate Traffic
 
 ```bash
-cd scripts
-
-# Install dependencies (one time)
 pip install httpx
-
-# Run the simulator — 200 requests, 35% malicious
-python simulate_attacks.py --count 200 --ratio 0.35 --delay 0.05
-
-# Heavy attack scenario
-python simulate_attacks.py --count 500 --ratio 0.7 --delay 0
+export AIWAF_INGEST_KEY=<INGEST_API_KEY from .env>
+python scripts/simulate_attacks.py --count 200 --ratio 0.35 --delay 0.05
 ```
 
-### 3. Watch the Dashboard
+---
 
-Open http://localhost:3000 and watch threats appear in real time via WebSocket.
+## 🏭 Production Deployment
+
+The default `docker-compose.yml` is the production stack:
+
+| Service | Role |
+|---------|------|
+| `caddy` | Only public entrypoint (80/443). Automatic Let's Encrypt TLS, security headers, 1 MB body limit, blocks `/metrics` and `/docs` |
+| `init` | One-off: `alembic upgrade head` + initial model bundle |
+| `backend` | Gunicorn + Uvicorn workers, non-root, model volume mounted **read-only** |
+| `worker` / `beat` | Celery: scheduled retraining + daily data retention |
+| `postgres` / `redis` | Internal network only, password-protected |
+| `backup` | Nightly `pg_dump` into `./backups` |
+
+**Steps on a fresh VPS:**
+
+1. Point a DNS `A` record (e.g. `waf.example.com`) at the server; open ports 80 and 443 only.
+2. Install Docker, clone the repo, `cp .env.example .env`, and fill in `DOMAIN` and all secrets.
+3. `docker compose up -d --build`
+4. Visit `https://waf.example.com` and sign in with `DASHBOARD_API_KEY`.
+5. Point your log shipper at `POST https://waf.example.com/api/logs/ingest` with header `X-API-Key: <INGEST_API_KEY>`.
+
+**Upgrading an existing installation** created by an older version (which used `create_all`, ran as root, and had the hardcoded password `aiwaf_secret`):
+
+```bash
+# 0. Back up first
+docker compose up -d postgres
+docker exec aiwaf_postgres pg_dump -U aiwaf -d aiwaf | gzip > backups/pre-migration.sql.gz
+
+# 1. Postgres only reads POSTGRES_PASSWORD when the volume is first created,
+#    so rotate the existing user to the new password from .env
+set -a; . ./.env; set +a
+docker exec aiwaf_postgres psql -U aiwaf -d aiwaf -c "ALTER USER aiwaf WITH PASSWORD '$POSTGRES_PASSWORD';"
+
+# 2. The API now runs as uid 10001; hand it the old root-owned model volume
+docker run --rm -v ai-waf_model_data:/m alpine chown -R 10001:10001 /m
+
+# 3. Mark the original schema as applied, then start (init applies 0002+)
+docker compose run --rm --no-deps init alembic stamp 0001
+docker compose up -d --build --remove-orphans
+```
+
+**Auth model**
+
+| Key | Grants |
+|-----|--------|
+| `INGEST_API_KEY` | `POST /api/logs/ingest` only |
+| `DASHBOARD_API_KEY` | All read endpoints, labeling, retraining, WebSocket (`/ws/stream?token=…`) |
+
+**Observability:** JSON logs on stdout; `/health` (liveness) and `/ready` (DB + Redis + models) for probes; Prometheus metrics at `/metrics` on the internal network (`aiwaf_requests_analyzed_total`, `aiwaf_detection_seconds`, HTTP metrics).
 
 ---
 
@@ -135,7 +177,7 @@ ai-waf/
 │   ├── ml/
 │   │   └── model_manager.py       # Ensemble model loader + inference
 │   ├── api/routes/
-│   │   ├── logs.py                # POST /api/logs/ingest
+│   │   ├── logs.py                # POST /api/logs/ingest, PATCH label
 │   │   ├── threats.py             # GET /api/threats/alerts
 │   │   ├── dashboard.py           # GET /api/dashboard/stats
 │   │   ├── models.py              # POST /api/models/retrain
@@ -151,9 +193,10 @@ ai-waf/
 │       └── styles.css             # Dark cybersecurity theme
 ├── scripts/
 │   └── simulate_attacks.py        # Attack traffic generator
-├── nginx/
-│   └── nginx.conf                 # Reverse proxy + WS config
-└── docker-compose.yml
+├── caddy/
+│   └── Caddyfile                  # TLS edge proxy + security headers
+├── docker-compose.yml             # Production stack
+└── docker-compose.dev.yml         # Local overrides (ports, /docs)
 ```
 
 ---
@@ -192,6 +235,7 @@ Detects **OWASP Top 10** attack patterns using 20+ regex rules:
 ```http
 POST /api/logs/ingest
 Content-Type: application/json
+X-API-Key: <INGEST_API_KEY>
 
 {
   "ip_address": "45.33.32.156",
@@ -216,7 +260,7 @@ Content-Type: application/json
 ### WebSocket Stream
 
 ```javascript
-const ws = new WebSocket("ws://localhost:8000/ws/stream");
+const ws = new WebSocket(`wss://${location.host}/ws/stream?token=${DASHBOARD_API_KEY}`);
 ws.onmessage = (e) => {
   const { type, data } = JSON.parse(e.data);
   // type: "new_request" | "alert"
@@ -227,49 +271,37 @@ ws.onmessage = (e) => {
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/logs/` | Paginated log history |
+| GET | `/api/logs/` | Paginated log history (`limit` ≤ 200) |
+| PATCH | `/api/logs/{id}/label` | Human-verified label `{"is_malicious": bool}` — the retraining ground truth |
 | GET | `/api/threats/alerts` | Active threat alerts |
 | GET | `/api/dashboard/stats` | Aggregated statistics |
-| POST | `/api/models/retrain` | Trigger model retraining |
-| GET | `/api/models/status` | Model health check |
-| GET | `/health` | Service health |
+| POST | `/api/models/retrain` | Queue model retraining (Celery) |
+| GET | `/api/models/status` | Loaded model version + latest training metrics |
+| GET | `/health` | Liveness (public) |
+| GET | `/ready` | Readiness: DB, Redis, models (internal) |
 
-Full interactive docs at **http://localhost:8000/docs**
+All `/api/*` endpoints require `X-API-Key`. Interactive docs are available at http://localhost:8000/docs when running with `docker-compose.dev.yml`.
 
 ---
 
 ## ⚙️ Configuration
 
-All configuration via environment variables or `.env`:
+All configuration is via environment variables — see [`.env.example`](.env.example). Required: `DOMAIN`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `INGEST_API_KEY`, `DASHBOARD_API_KEY` (keys ≥ 32 chars, and different from each other). The app refuses to start without them, and validates that ensemble weights sum to 1.0.
 
-```env
-# Database
-DATABASE_URL=postgresql+asyncpg://aiwaf:aiwaf_secret@postgres:5432/aiwaf
-REDIS_URL=redis://redis:6379/0
-
-# Detection thresholds
-THREAT_SCORE_LOW=0.30
-THREAT_SCORE_MEDIUM=0.60
-THREAT_SCORE_HIGH=0.85
-
-# Ensemble weights (must sum to 1.0)
-RULE_WEIGHT=0.45
-ISOLATION_FOREST_WEIGHT=0.20
-RANDOM_FOREST_WEIGHT=0.25
-AUTOENCODER_WEIGHT=0.10
-```
+The autoencoder is not implemented yet, so `AUTOENCODER_WEIGHT` defaults to `0` and its former 10% goes to the Random Forest.
 
 ---
 
 ## 🔄 Model Retraining
 
-Once enough real traffic accumulates in the database, trigger retraining via the dashboard or API:
+Retraining uses **only human-verified labels** — click **Attack** / **Benign** on rows in the dashboard (or call `PATCH /api/logs/{id}/label`). Training on the model's own predictions would create a feedback loop and let attackers poison the model.
 
-```bash
-curl -X POST http://localhost:8000/api/models/retrain
-```
+- Runs every `RETRAIN_INTERVAL_HOURS` (default 6) via Celery beat, or on demand with the **Retrain** button.
+- Needs `RETRAIN_MIN_VERIFIED_SAMPLES` (default 200) labels covering both classes.
+- A candidate is evaluated on a held-out split of real verified traffic and promoted only if F1 ≥ `RETRAIN_MIN_F1` and not worse than the current model. Results are recorded in `model_metadata`.
+- Promoted models are written atomically and every API worker hot-reloads them via Redis pub/sub.
 
-The system will pull labeled request logs from PostgreSQL and retrain the Isolation Forest and Random Forest models, then save them to disk.
+Request logs older than `RETENTION_DAYS` (default 30) are purged daily; verified samples are kept.
 
 ---
 
@@ -277,8 +309,8 @@ The system will pull labeled request logs from PostgreSQL and retrain the Isolat
 
 ```bash
 cd backend
-pip install pytest pytest-asyncio httpx
-pytest tests/ -v
+pip install -r requirements-dev.txt
+pytest -v
 ```
 
 ---
@@ -290,7 +322,7 @@ pytest tests/ -v
 - [ ] Graph Neural Network for IP relationship analysis
 - [ ] Kubernetes Helm chart
 - [ ] ONNX export for all models
-- [ ] Prometheus metrics endpoint
+- [x] Prometheus metrics endpoint
 - [ ] IP reputation scoring
 
 ---

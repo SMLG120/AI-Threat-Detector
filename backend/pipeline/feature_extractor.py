@@ -65,7 +65,16 @@ class FeatureVector(BaseModel):
     ua_is_empty: float
 
     def to_numpy(self) -> np.ndarray:
-        return np.array(list(self.model_dump().values()), dtype=np.float32)
+        return np.array([getattr(self, n) for n in FEATURE_NAMES], dtype=np.float32)
+
+
+# Canonical feature order used by training and inference
+FEATURE_NAMES: list[str] = list(FeatureVector.model_fields.keys())
+
+
+def features_dict_to_array(features: dict) -> np.ndarray:
+    """Convert a stored features dict (DB JSON column) to a vector in canonical order."""
+    return np.array([float(features[n]) for n in FEATURE_NAMES], dtype=np.float32)
 
 
 KNOWN_BOT_PATTERNS = re.compile(

@@ -1,53 +1,140 @@
+# Production stack. Configure via .env (copy .env.example → .env).
+#   docker compose up -d --build
+# Only Caddy (80/443) is published; everything else is on the internal network.
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  DATABASE_URL: postgresql+asyncpg://aiwaf:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/aiwaf
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
+  INGEST_API_KEY: ${INGEST_API_KEY:?set INGEST_API_KEY in .env}
+  DASHBOARD_API_KEY: ${DASHBOARD_API_KEY:?set DASHBOARD_API_KEY in .env}
+  MODEL_DIR: /app/models
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  ENABLE_DOCS: ${ENABLE_DOCS:-false}
+  RETENTION_DAYS: ${RETENTION_DAYS:-30}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  THREAT_SCORE_LOW: ${THREAT_SCORE_LOW:-0.30}
+  THREAT_SCORE_MEDIUM: ${THREAT_SCORE_MEDIUM:-0.60}
+  THREAT_SCORE_HIGH: ${THREAT_SCORE_HIGH:-0.85}
+  RULE_WEIGHT: ${RULE_WEIGHT:-0.45}
+  ISOLATION_FOREST_WEIGHT: ${ISOLATION_FOREST_WEIGHT:-0.20}
+  RANDOM_FOREST_WEIGHT: ${RANDOM_FOREST_WEIGHT:-0.35}
+  AUTOENCODER_WEIGHT: ${AUTOENCODER_WEIGHT:-0.0}
+
+x-backend-build: &backend-build
+  build: ./backend
+  image: aiwaf-backend
 
 services:
-  backend:
-    build: ./backend
-    container_name: aiwaf_backend
+  caddy:
+    image: caddy:2-alpine
+    container_name: aiwaf_caddy
     ports:
-      - "8000:8000"
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://aiwaf:aiwaf_secret@postgres:5432/aiwaf
-      - REDIS_URL=redis://redis:6379/0
-      - MODEL_DIR=/app/models
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
     volumes:
-      - ./logs:/app/logs
-      - model_data:/app/models
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    logging: *logging
+
+  # One-off: run DB migrations and create the initial model bundle
+  init:
+    <<: *backend-build
+    command: sh -c "alembic upgrade head && python -m ml.bootstrap"
     healthcheck:
-      test: ["CMD", "python", "-c", "import asyncio; from core.database import engine; asyncio.run(engine.connect())"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      disable: true
+    environment: *backend-env
+    volumes:
+      - model_data:/app/models
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-  worker:
-    build: ./backend
-    container_name: aiwaf_worker
-    command: python -m celery -A core.celery_app worker --loglevel=info -Q detection
+    restart: "no"
+    logging: *logging
+
+  backend:
+    <<: *backend-build
+    container_name: aiwaf_backend
     environment:
-      - DATABASE_URL=postgresql+asyncpg://aiwaf:aiwaf_secret@postgres:5432/aiwaf
-      - REDIS_URL=redis://redis:6379/0
-      - MODEL_DIR=/app/models
+      <<: *backend-env
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
     volumes:
-      - ./logs:/app/logs
+      - model_data:/app/models:ro   # read-only: only trainers may write pickles
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    logging: *logging
+
+  worker:
+    <<: *backend-build
+    container_name: aiwaf_worker
+    command: celery -A core.celery_app worker --loglevel=info --concurrency=2
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A core.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10 | grep -q pong"]
+      interval: 60s
+      timeout: 30s
+      start_period: 120s
+      retries: 3
+    environment: *backend-env
+    volumes:
       - model_data:/app/models
     depends_on:
-      - backend
-      - redis
+      init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 3g
+    logging: *logging
+
+  beat:
+    <<: *backend-build
+    container_name: aiwaf_beat
+    command: celery -A core.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    healthcheck:
+      disable: true   # no HTTP server; the image's API healthcheck doesn't apply
+    environment: *backend-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
 
   frontend:
     build: ./frontend
     container_name: aiwaf_frontend
-    ports:
-      - "3000:80"
-    depends_on:
-      - backend
     restart: unless-stopped
+    logging: *logging
 
   postgres:
     image: postgres:16-alpine
@@ -55,37 +142,57 @@ services:
     environment:
       POSTGRES_DB: aiwaf
       POSTGRES_USER: aiwaf
-      POSTGRES_PASSWORD: aiwaf_secret
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pg_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aiwaf"]
+      test: ["CMD-SHELL", "pg_isready -U aiwaf -d aiwaf"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging: *logging
 
   redis:
     image: redis:7-alpine
     container_name: aiwaf_redis
-    ports:
-      - "6379:6379"
-    restart: unless-stopped
-
-  nginx:
-    image: nginx:alpine
-    container_name: aiwaf_nginx
+    command: redis-server --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
-      - ./logs:/var/log/nginx
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-      - frontend
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
+    logging: *logging
+
+  # Nightly pg_dump, keeps the last BACKUP_KEEP_DAYS days in ./backups
+  backup:
+    image: postgres:16-alpine
+    container_name: aiwaf_backup
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint: ["sh", "/backup.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
 
 volumes:
   pg_data:
+  redis_data:
   model_data:
+  caddy_data:
+  caddy_config:

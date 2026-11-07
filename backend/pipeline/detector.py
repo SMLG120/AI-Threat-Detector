@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from typing import List
 from urllib.parse import urlparse
 
+from starlette.concurrency import run_in_threadpool
+
 from core.config import settings
+from core.metrics import DETECTION_LATENCY, REQUESTS_ANALYZED
 from pipeline.feature_extractor import RawRequest, extract_features
 from rules.engine import run_rules, RuleMatch
 from ml.model_manager import model_manager
@@ -37,7 +40,18 @@ def classify_threat_level(score: float) -> str:
 
 
 async def analyze_request(req: RawRequest) -> DetectionResult:
-    """Full detection pipeline for a single request."""
+    """
+    Full detection pipeline for a single request.
+    Regex + sklearn inference are CPU-bound, so run them in a worker thread
+    to avoid blocking the event loop (WebSockets, other requests).
+    """
+    with DETECTION_LATENCY.time():
+        result = await run_in_threadpool(analyze_request_sync, req)
+    REQUESTS_ANALYZED.labels(threat_level=result.threat_level).inc()
+    return result
+
+
+def analyze_request_sync(req: RawRequest) -> DetectionResult:
 
     parsed = urlparse(req.url)
     query = parsed.query or ""

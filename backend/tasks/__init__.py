@@ -1,23 +1,24 @@
 """
 Celery tasks for async log processing.
-Used by the worker container to process logs from the Redis queue.
+Optional path for bulk/offline analysis: enqueue with
+    celery_app.send_task("tasks.detection.process_log", args=[log_dict])
+The real-time path is POST /api/logs/ingest.
 """
-import asyncio
-from core.celery_app import celery_app
-from pipeline.feature_extractor import RawRequest
-from pipeline.detector import analyze_request
 from loguru import logger
+
+from core.celery_app import celery_app
+from ml.model_manager import model_manager
+from pipeline.detector import analyze_request_sync
+from pipeline.feature_extractor import RawRequest
 
 
 @celery_app.task(name="tasks.detection.process_log", bind=True, max_retries=3)
 def process_log_task(self, log_data: dict) -> dict:
-    """
-    Process a raw log entry asynchronously.
-    Runs the full detection pipeline and returns results.
-    """
+    """Run the full detection pipeline for one raw log entry."""
     try:
-        raw = RawRequest(**log_data)
-        result = asyncio.get_event_loop().run_until_complete(analyze_request(raw))
+        if not model_manager.is_ready:
+            model_manager.load_models(bootstrap_if_missing=False)
+        result = analyze_request_sync(RawRequest(**log_data))
         return {
             "threat_score": result.threat_score,
             "threat_level": result.threat_level,

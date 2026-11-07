@@ -1,0 +1,44 @@
+# Edge proxy: automatic HTTPS (Let's Encrypt), security headers, routing.
+# DOMAIN comes from .env. With DOMAIN=localhost Caddy uses a local self-signed CA.
+{$DOMAIN} {
+	encode zstd gzip
+
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+
+	# Internal-only endpoints are never exposed publicly.
+	# (Must be a `handle` block: Caddy runs `handle` before a bare `respond`.)
+	@internal path /metrics /metrics/* /docs /docs/* /redoc /openapi.json /ready
+	handle @internal {
+		respond 404
+	}
+
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+	handle /ws/* {
+		reverse_proxy backend:8000
+	}
+	handle /health {
+		reverse_proxy backend:8000
+	}
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

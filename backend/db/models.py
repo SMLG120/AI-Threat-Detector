@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, Integer, Boolean, DateTime, Text, JSON
+from sqlalchemy import Column, String, Float, Integer, Boolean, DateTime, Text, JSON, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 import uuid
@@ -26,9 +26,14 @@ class RequestLog(Base):
 
     # Detection results
     threat_score = Column(Float, default=0.0, index=True)
-    threat_level = Column(String(10), default="LOW")  # LOW / MEDIUM / HIGH
-    is_malicious = Column(Boolean, default=False)
+    threat_level = Column(String(10), default="LOW", index=True)  # LOW / MEDIUM / HIGH
+    is_malicious = Column(Boolean, default=False, index=True)
     attack_types = Column(JSON)  # list of detected attack categories
+
+    # Human-verified ground truth (set via PATCH /api/logs/{id}/label).
+    # Retraining uses ONLY these labels, never the model's own predictions.
+    verified_label = Column(Boolean, nullable=True, index=True)  # True = malicious
+    labeled_at = Column(DateTime(timezone=True), nullable=True)
 
     # Model scores
     rule_score = Column(Float, default=0.0)
@@ -45,7 +50,12 @@ class Alert(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-    log_id = Column(UUID(as_uuid=True), nullable=False)
+    log_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("request_logs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     ip_address = Column(String(45))
     threat_level = Column(String(10))
     threat_score = Column(Float)
@@ -59,7 +69,7 @@ class ModelMetadata(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     model_name = Column(String(100))
-    version = Column(String(20))
+    version = Column(String(40))
     trained_at = Column(DateTime(timezone=True))
     accuracy = Column(Float)
     samples_used = Column(Integer)

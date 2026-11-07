@@ -5,12 +5,14 @@ Sends 60 pre-crafted requests (benign + attacks) to populate the dashboard.
 Run with: python scripts/seed_data.py
 
 Requires: pip install httpx
-Backend must be running on localhost:8000
+Set AIWAF_INGEST_KEY (the INGEST_API_KEY from .env) and optionally AIWAF_URL.
 """
 import asyncio
+import os
 import httpx
 
-API = "http://localhost:8000/api/logs/ingest"
+API = os.getenv("AIWAF_URL", "http://localhost:8000").rstrip("/") + "/api/logs/ingest"
+API_KEY = os.getenv("AIWAF_INGEST_KEY", "")
 
 SAMPLES = [
     # ── Benign traffic ────────────────────────────────────────────────────────
@@ -93,7 +95,10 @@ async def seed():
 
     ok = err = 0
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    if not API_KEY:
+        raise SystemExit("Set AIWAF_INGEST_KEY to the INGEST_API_KEY value from .env")
+
+    async with httpx.AsyncClient(timeout=15, headers={"X-API-Key": API_KEY}) as client:
         for i, payload in enumerate(SAMPLES, 1):
             try:
                 resp = await client.post(API, json=payload)
@@ -116,7 +121,7 @@ async def seed():
                 err += 1
 
     print(f"\n✅ Done! {ok} inserted, {err} failed")
-    print(f"   → Open http://localhost:3000 to see the dashboard")
+    print("   → Open https://localhost (or your DOMAIN) to see the dashboard")
 
 
 if __name__ == "__main__":
