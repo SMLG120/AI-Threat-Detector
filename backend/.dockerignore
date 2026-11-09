@@ -7,3 +7,5 @@ __pycache__
 models/
 logs/
 tests/
+# Finder/iCloud conflict copies ("foo 2.py"); a duplicate Alembic migration breaks startup
+**/* 2*
